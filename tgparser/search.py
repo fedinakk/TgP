@@ -98,8 +98,18 @@ async def discover_chats(
     """
     found: dict[int, tuple[Channel | Chat, list[str]]] = {}
 
+    total_queries = sum(len(c.search_queries) for c in CATEGORIES)
+    logger.info(
+        "Searching Telegram: %d queries across %d categories (this runs silently "
+        "for a while between log lines, that's expected)",
+        total_queries,
+        len(CATEGORIES),
+    )
+
+    query_no = 0
     for category in CATEGORIES:
         for query in category.search_queries:
+            query_no += 1
             for broadcasts_only, groups_only in ((True, False), (False, True)):
                 async for entity in _search_query(
                     client,
@@ -116,6 +126,14 @@ async def discover_chats(
                             cats.append(category.key)
                     else:
                         found[entity.id] = (entity, [category.key])
+            logger.info(
+                "[%d/%d] %r (%s) -> %d candidates so far",
+                query_no,
+                total_queries,
+                query,
+                category.label,
+                len(found),
+            )
             await asyncio.sleep(config.request_delay_seconds)
 
     logger.info("Discovered %d unique candidate chats/channels", len(found))
