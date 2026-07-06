@@ -1,4 +1,4 @@
 telethon>=1.36,<2
 python-dotenv>=1.0
-PySocks>=1.7
+python-socks[asyncio]>=2.4
 pytest>=8.0

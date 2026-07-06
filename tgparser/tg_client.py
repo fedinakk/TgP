@@ -4,7 +4,6 @@ from __future__ import annotations
 import getpass
 import logging
 
-import socks
 from telethon import TelegramClient
 from telethon.errors import SessionPasswordNeededError
 
@@ -12,21 +11,19 @@ from .config import Config
 
 logger = logging.getLogger(__name__)
 
-_PROXY_TYPES = {
-    "socks5": socks.SOCKS5,
-    "socks4": socks.SOCKS4,
-    "http": socks.HTTP,
-}
+_VALID_PROXY_TYPES = {"socks5", "socks4", "http"}
 
 
 def _proxy_tuple(config: Config):
     proxy = config.proxy
     if not proxy.enabled:
         return None
-    proxy_type = _PROXY_TYPES.get(proxy.type.lower())
-    if proxy_type is None:
+    proxy_type = proxy.type.lower()
+    if proxy_type not in _VALID_PROXY_TYPES:
         raise ValueError(f"Unsupported PROXY_TYPE: {proxy.type!r} (use socks5/socks4/http)")
-    # PySocks-style tuple: (proxy_type, host, port, rdns, username, password)
+    # Telethon accepts the type as a plain lowercase string (it resolves the
+    # actual constant itself via whichever of python-socks/PySocks is
+    # installed) — (proxy_type, host, port, rdns, username, password).
     return (proxy_type, proxy.host, proxy.port, True, proxy.username, proxy.password)
 
 
