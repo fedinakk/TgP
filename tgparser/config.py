@@ -17,6 +17,13 @@ def _env_int(name: str, default: int | None = None) -> int | None:
     return int(value)
 
 
+def _env_bool(name: str, default: bool) -> bool:
+    value = os.getenv(name)
+    if value is None or value == "":
+        return default
+    return value.strip().lower() in ("1", "true", "yes", "on")
+
+
 @dataclass(frozen=True)
 class ProxyConfig:
     type: str | None
@@ -41,9 +48,17 @@ class Config:
 
     active_window_hours: int
     messages_per_chat: int
-    chats_per_keyword: int
+    max_pages_per_query: int
     request_delay_seconds: float
     output_dir: Path
+
+    target_channels: int
+    target_chats: int
+    concurrency: int
+    snowball_max_rounds: int
+    max_runtime_minutes: int | None
+    seeds_file: Path | None
+    notify_saved_messages: bool
 
 
 def load_config() -> Config:
@@ -63,6 +78,11 @@ def load_config() -> Config:
         password=os.getenv("PROXY_PASSWORD") or None,
     )
 
+    seeds_file_raw = os.getenv("SEEDS_FILE", "seeds.txt")
+    seeds_path = Path(seeds_file_raw) if seeds_file_raw else None
+    if seeds_path and not seeds_path.exists():
+        seeds_path = None
+
     return Config(
         api_id=api_id,
         api_hash=api_hash,
@@ -72,7 +92,14 @@ def load_config() -> Config:
         proxy=proxy,
         active_window_hours=_env_int("ACTIVE_WINDOW_HOURS", 24),
         messages_per_chat=_env_int("MESSAGES_PER_CHAT", 80),
-        chats_per_keyword=_env_int("CHATS_PER_KEYWORD", 25),
+        max_pages_per_query=_env_int("MAX_PAGES_PER_QUERY", 3),
         request_delay_seconds=float(os.getenv("REQUEST_DELAY_SECONDS", "1.5")),
         output_dir=Path(os.getenv("OUTPUT_DIR", "out")),
+        target_channels=_env_int("TARGET_CHANNELS", 80),
+        target_chats=_env_int("TARGET_CHATS", 20),
+        concurrency=_env_int("CONCURRENCY", 5),
+        snowball_max_rounds=_env_int("SNOWBALL_MAX_ROUNDS", 3),
+        max_runtime_minutes=_env_int("MAX_RUNTIME_MINUTES", 90),
+        seeds_file=seeds_path,
+        notify_saved_messages=_env_bool("NOTIFY_SAVED_MESSAGES", True),
     )

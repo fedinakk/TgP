@@ -11,14 +11,125 @@ import dataclasses
 import logging
 from pathlib import Path
 
+from telethon import TelegramClient
+
 from .analyzer import analyze_chat
-from .config import load_config
+from .config import Config, load_config
+from .links import extract_usernames
+from .models import SourceReport
 from .report import write_reports
-from .search import discover_chats
+from .search import discover_chats, resolve_seeds, resolve_usernames
 from .tg_client import build_client
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
+
+
+def _split_counts(sources: dict[int, SourceReport]) -> tuple[int, int]:
+    channels = sum(1 for s in sources.values() if s.kind == "channel")
+    chats = sum(1 for s in sources.values() if s.kind == "chat")
+    return channels, chats
+
+
+async def _notify_found(client: TelegramClient, report: SourceReport) -> None:
+    text = (
+        f"Найден источник: {report.title}\n"
+        f"{report.link}\n"
+        f"Тематика: {', '.join(report.matched_categories) or '-'}"
+    )
+    try:
+        await client.send_message("me", text)
+    except Exception:
+        logger.exception("Failed to notify Saved Messages about %s", report.link)
+
+
+async def _analyze_batch(
+    client: TelegramClient,
+    config: Config,
+    candidates: dict[int, object],
+    confirmed: dict[int, SourceReport],
+    visited: set[int],
+) -> None:
+    """Analyze a batch of candidate entities concurrently (bounded by
+    config.concurrency). Confirmed sources are added to `confirmed` and,
+    if enabled, immediately pushed to Saved Messages so they're visible
+    while the run is still going.
+    """
+    semaphore = asyncio.Semaphore(config.concurrency)
+
+    async def _worker(entity) -> None:
+        async with semaphore:
+            title = getattr(entity, "title", entity.id)
+            try:
+                report = await analyze_chat(client, entity, config)
+            except Exception:
+                logger.exception("Failed to analyze %s, skipping", title)
+                return
+            if report:
+                confirmed[entity.id] = report
+                logger.info(
+                    "[%s] %s -- %s (%s)",
+                    report.kind,
+                    report.title,
+                    report.link,
+                    ", ".join(report.matched_categories),
+                )
+                if config.notify_saved_messages:
+                    await _notify_found(client, report)
+            await asyncio.sleep(config.request_delay_seconds)
+
+    to_run = [entity for cid, entity in candidates.items() if cid not in visited]
+    visited.update(candidates.keys())
+    if not to_run:
+        return
+    logger.info("Analyzing %d candidate chats...", len(to_run))
+    await asyncio.gather(*(_worker(entity) for entity in to_run))
+
+
+async def _pipeline(
+    client: TelegramClient,
+    config: Config,
+    confirmed: dict[int, SourceReport],
+    visited: set[int],
+) -> None:
+    seeds = await resolve_seeds(client, config.seeds_file)
+    if seeds:
+        logger.info("Loaded %d seed candidates from %s", len(seeds), config.seeds_file)
+        await _analyze_batch(client, config, seeds, confirmed, visited)
+
+    discovered = await discover_chats(client, config)
+    candidates = {cid: entity for cid, (entity, _cats) in discovered.items()}
+    await _analyze_batch(client, config, candidates, confirmed, visited)
+
+    for round_no in range(1, config.snowball_max_rounds + 1):
+        channels_count, chats_count = _split_counts(confirmed)
+        if channels_count >= config.target_channels and chats_count >= config.target_chats:
+            logger.info(
+                "Targets reached (%d channels, %d chats), stopping.",
+                channels_count,
+                chats_count,
+            )
+            break
+
+        usernames: set[str] = set()
+        for report in confirmed.values():
+            usernames |= extract_usernames(report.about)
+            for post in report.sample_posts:
+                usernames |= extract_usernames(post.text)
+
+        if not usernames:
+            logger.info("No linked usernames to follow, stopping snowball.")
+            break
+
+        logger.info(
+            "Snowball round %d: resolving %d linked usernames", round_no, len(usernames)
+        )
+        new_candidates = await resolve_usernames(client, usernames)
+        new_candidates = {cid: e for cid, e in new_candidates.items() if cid not in visited}
+        if not new_candidates:
+            logger.info("Snowball round %d found nothing new, stopping.", round_no)
+            break
+        await _analyze_batch(client, config, new_candidates, confirmed, visited)
 
 
 async def run_search(output_dir: str | None) -> None:
@@ -27,25 +138,32 @@ async def run_search(output_dir: str | None) -> None:
         config = dataclasses.replace(config, output_dir=Path(output_dir))
 
     client = await build_client(config)
+    confirmed: dict[int, SourceReport] = {}
+    visited: set[int] = set()
+
     try:
-        candidates = await discover_chats(client, config)
-        logger.info("Analyzing %d candidate chats...", len(candidates))
-
-        sources = []
-        for i, (entity, _matched_via) in enumerate(candidates.values(), start=1):
-            title = getattr(entity, "title", entity.id)
-            logger.info("[%d/%d] Analyzing %s", i, len(candidates), title)
+        pipeline = _pipeline(client, config, confirmed, visited)
+        if config.max_runtime_minutes:
             try:
-                report = await analyze_chat(client, entity, config)
-            except Exception:
-                logger.exception("Failed to analyze %s, skipping", title)
-                continue
-            if report:
-                sources.append(report)
-            await asyncio.sleep(config.request_delay_seconds)
+                await asyncio.wait_for(pipeline, timeout=config.max_runtime_minutes * 60)
+            except asyncio.TimeoutError:
+                logger.info(
+                    "MAX_RUNTIME_MINUTES (%d) reached, stopping and saving what was found so far.",
+                    config.max_runtime_minutes,
+                )
+        else:
+            await pipeline
 
-        md_path, json_path = write_reports(sources, config.output_dir)
-        logger.info("Done. %d relevant active sources found.", len(sources))
+        channels_count, chats_count = _split_counts(confirmed)
+        logger.info(
+            "Finished: %d channels, %d chats confirmed (targets: %d channels / %d chats).",
+            channels_count,
+            chats_count,
+            config.target_channels,
+            config.target_chats,
+        )
+
+        md_path, json_path = write_reports(list(confirmed.values()), config.output_dir)
         logger.info("Markdown report: %s", md_path)
         logger.info("JSON report: %s", json_path)
     finally:
@@ -57,7 +175,9 @@ def main() -> None:
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     search_parser = subparsers.add_parser("search", help="Discover and analyze sources")
-    search_parser.add_argument("--output-dir", default=None, help="Where to write report.md/report.json")
+    search_parser.add_argument(
+        "--output-dir", default=None, help="Where to write report.md/report.json"
+    )
 
     args = parser.parse_args()
 

@@ -1,4 +1,10 @@
-from tgparser.filters import is_relevant_job_post, is_spam, matched_categories
+from tgparser.filters import (
+    has_price_signal,
+    is_bot_welcome,
+    is_relevant_job_post,
+    is_spam,
+    matched_categories,
+)
 
 
 def test_video_editing_job_post_is_relevant():
@@ -51,3 +57,25 @@ def test_matched_categories_multiple():
     categories = matched_categories(text)
     assert "smm" in categories
     assert "creatives" in categories
+
+
+def test_welcome_bot_message_is_detected():
+    assert is_bot_welcome("Hi @shivendra_doniwal welcome to my Video Editors group")
+    assert is_bot_welcome("Добро пожаловать в нашу группу, новый участник!")
+    assert not is_bot_welcome("Нужен видеомонтажер, оплата 500р за ролик")
+
+
+def test_welcome_bot_message_excluded_even_with_topic_words():
+    text = "Hi Umar welcome to my Video Editors group Freelance Video Editors"
+    relevant, _ = is_relevant_job_post(text)
+    assert not relevant
+
+
+def test_price_signal_counts_as_order_even_without_job_words():
+    assert has_price_signal("Видеомонтажер, 500р за ролик")
+    assert has_price_signal("Ищу монтажера, $50 за видео")
+    # no explicit job word ("вакансия"/"ищу"/etc.) -> only the price signal
+    # should make this count as an order
+    relevant, categories = is_relevant_job_post("Видеомонтажер, 500р за ролик, пишите в лс")
+    assert relevant
+    assert "video_editing" in categories

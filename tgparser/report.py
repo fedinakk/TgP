@@ -22,38 +22,52 @@ def to_json(sources: list[SourceReport]) -> str:
     return json.dumps([asdict(s) for s in sources], default=default, ensure_ascii=False, indent=2)
 
 
+def _render_source(source: SourceReport) -> list[str]:
+    lines = [f"## {source.title}", ""]
+    lines.append(f"- **Ссылка:** {source.link}")
+    lines.append(f"- **Тип:** {'канал' if source.kind == 'channel' else 'чат'}")
+    if source.participants_count:
+        lines.append(f"- **Подписчиков/участников:** {source.participants_count}")
+    if source.last_activity:
+        lines.append(f"- **Последняя активность:** {source.last_activity.isoformat()}")
+    if source.matched_categories:
+        lines.append(f"- **Тематика:** {', '.join(source.matched_categories)}")
+    if source.about:
+        about = source.about.replace("\n", " ").strip()
+        lines.append(f"- **Описание:** {about[:300]}")
+    lines.append("")
+    lines.append("**Примеры релевантных постов:**")
+    lines.append("")
+    for post in source.sample_posts:
+        date_str = post.date.isoformat() if post.date else "?"
+        snippet = post.text.replace("\n", " ").strip()
+        link_part = f" ([пост]({post.link}))" if post.link else ""
+        lines.append(f"- `{date_str}`{link_part}: {snippet}")
+    lines.append("")
+    return lines
+
+
 def to_markdown(sources: list[SourceReport]) -> str:
     generated_at = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    channels = [s for s in sources if s.kind == "channel"]
+    chats = [s for s in sources if s.kind == "chat"]
+
     lines = [
-        f"# Telegram-источники заказов: видеомонтаж / reels / motion / SMM / креативы",
+        "# Telegram-источники заказов: видеомонтаж / reels / motion / SMM / креативы",
         "",
-        f"_Сформировано: {generated_at}. Источников найдено: {len(sources)}._",
+        f"_Сформировано: {generated_at}. Найдено каналов: {len(channels)}, чатов: {len(chats)}._",
         "",
     ]
 
-    for source in sources:
-        lines.append(f"## {source.title}")
-        lines.append("")
-        lines.append(f"- **Ссылка:** {source.link}")
-        lines.append(f"- **Тип:** {'канал' if source.kind == 'channel' else 'чат'}")
-        if source.participants_count:
-            lines.append(f"- **Подписчиков/участников:** {source.participants_count}")
-        if source.last_activity:
-            lines.append(f"- **Последняя активность:** {source.last_activity.isoformat()}")
-        if source.matched_categories:
-            lines.append(f"- **Тематика:** {', '.join(source.matched_categories)}")
-        if source.about:
-            about = source.about.replace("\n", " ").strip()
-            lines.append(f"- **Описание:** {about[:300]}")
-        lines.append("")
-        lines.append("**Примеры релевантных постов:**")
-        lines.append("")
-        for post in source.sample_posts:
-            date_str = post.date.isoformat() if post.date else "?"
-            snippet = post.text.replace("\n", " ").strip()
-            link_part = f" ([пост]({post.link}))" if post.link else ""
-            lines.append(f"- `{date_str}`{link_part}: {snippet}")
-        lines.append("")
+    lines.append(f"# Каналы ({len(channels)})")
+    lines.append("")
+    for source in channels:
+        lines.extend(_render_source(source))
+
+    lines.append(f"# Чаты ({len(chats)})")
+    lines.append("")
+    for source in chats:
+        lines.extend(_render_source(source))
 
     return "\n".join(lines)
 

@@ -1,0 +1,11 @@
+# Extra candidate channels/chats to always check, one per line.
+# Useful for channels you found manually (e.g. browsing TGStat/Telega.in
+# catalog categories like "Маркетинг, PR", "Дизайн", "Фриланс") that the
+# in-app search might not surface.
+#
+# Any of these forms work:
+# @some_channel_username
+# https://t.me/some_channel_username
+# some_channel_username
+#
+# Copy this file to seeds.txt (or point SEEDS_FILE at it) and fill it in.
