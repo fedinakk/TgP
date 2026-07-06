@@ -1,6 +1,6 @@
 from datetime import datetime, timezone
 
-from tgparser.models import SamplePost, SourceReport
+from tgparser.models import PendingSource, SamplePost, SourceReport
 from tgparser.report import sort_sources, to_markdown
 
 
@@ -28,11 +28,23 @@ def test_markdown_splits_channels_and_chats_into_sections():
         _make_source("chat", "ChatA", 1),
         _make_source("channel", "ChannelB", 1),
     ]
-    md = to_markdown(sources)
+    md = to_markdown(sources, pending=[])
     assert "# Каналы (2)" in md
     assert "# Чаты (1)" in md
     assert md.index("# Каналы (2)") < md.index("# Чаты (1)")
     assert "ChannelA" in md and "ChannelB" in md and "ChatA" in md
+
+
+def test_markdown_includes_pending_section_when_present():
+    pending = [PendingSource(chat_id=1, title="NeedsApproval", link="https://t.me/needsapproval", kind="chat")]
+    md = to_markdown([], pending=pending)
+    assert "Требуют заявки на вступление (1)" in md
+    assert "NeedsApproval" in md
+
+
+def test_markdown_omits_pending_section_when_empty():
+    md = to_markdown([_make_source("channel", "Solo", 1)], pending=[])
+    assert "Требуют заявки" not in md
 
 
 def test_sort_sources_orders_by_score_descending():

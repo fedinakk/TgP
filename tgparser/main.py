@@ -14,10 +14,10 @@ from pathlib import Path
 
 from telethon import TelegramClient
 
-from .analyzer import analyze_chat
+from .analyzer import JoinBudget, analyze_chat
 from .config import Config, load_config
 from .links import extract_usernames
-from .models import SourceReport
+from .models import PendingSource, SourceReport
 from .report import write_reports
 from .search import discover_chats, resolve_seeds, resolve_usernames
 from .tg_client import build_client
@@ -44,12 +44,25 @@ async def _notify_found(client: TelegramClient, report: SourceReport) -> None:
         logger.exception("Failed to notify Saved Messages about %s", report.link)
 
 
+async def _notify_pending(client: TelegramClient, pending: PendingSource) -> None:
+    text = (
+        f"Нужно подать заявку на вступление, дальше сами:\n"
+        f"{pending.title}\n{pending.link}"
+    )
+    try:
+        await client.send_message("me", text)
+    except Exception:
+        logger.exception("Failed to notify Saved Messages about pending %s", pending.link)
+
+
 async def _analyze_batch(
     client: TelegramClient,
     config: Config,
     candidates: dict[int, object],
     confirmed: dict[int, SourceReport],
+    pending: dict[int, PendingSource],
     visited: set[int],
+    join_budget: JoinBudget,
     suppress_notify_ids: frozenset[int] = frozenset(),
 ) -> None:
     """Analyze a batch of candidate entities concurrently (bounded by
@@ -57,7 +70,8 @@ async def _analyze_batch(
     if enabled, immediately pushed to Saved Messages so they're visible
     while the run is still going -- unless their id is in
     `suppress_notify_ids` (already-known sources being re-verified, not
-    new finds).
+    new finds). Candidates that need an approved join request go to
+    `pending` instead, with their own notification.
     """
     semaphore = asyncio.Semaphore(config.concurrency)
 
@@ -65,23 +79,30 @@ async def _analyze_batch(
         async with semaphore:
             title = getattr(entity, "title", entity.id)
             try:
-                report = await analyze_chat(client, entity, config)
+                result = await analyze_chat(client, entity, config, join_budget)
             except Exception:
                 logger.exception("Failed to analyze %s, skipping", title)
                 return
-            if report:
-                confirmed[entity.id] = report
-                is_new = entity.id not in suppress_notify_ids
+
+            is_new = entity.id not in suppress_notify_ids
+
+            if isinstance(result, PendingSource):
+                pending[entity.id] = result
+                logger.info("[pending] %s -- %s (needs approved join request)", result.title, result.link)
+                if config.notify_saved_messages and is_new:
+                    await _notify_pending(client, result)
+            elif result:
+                confirmed[entity.id] = result
                 logger.info(
                     "[%s]%s %s -- %s (%s)",
-                    report.kind,
+                    result.kind,
                     "" if is_new else " (known)",
-                    report.title,
-                    report.link,
-                    ", ".join(report.matched_categories),
+                    result.title,
+                    result.link,
+                    ", ".join(result.matched_categories),
                 )
                 if config.notify_saved_messages and is_new:
-                    await _notify_found(client, report)
+                    await _notify_found(client, result)
             await asyncio.sleep(config.request_delay_seconds)
 
     to_run = [entity for cid, entity in candidates.items() if cid not in visited]
@@ -92,29 +113,46 @@ async def _analyze_batch(
     await asyncio.gather(*(_worker(entity) for entity in to_run))
 
 
+def _load_previous_report(path: Path) -> tuple[list[dict], list[dict]]:
+    """Supports both the current {"sources": [...], "pending": [...]}
+    schema and the older flat-list schema from earlier versions.
+    """
+    data = json.loads(path.read_text(encoding="utf-8"))
+    if isinstance(data, dict):
+        return data.get("sources", []), data.get("pending", [])
+    return data, []  # old format: a flat list of sources, no pending
+
+
 async def _recheck_previous_run(
     client: TelegramClient,
     config: Config,
     confirmed: dict[int, SourceReport],
+    pending: dict[int, PendingSource],
     visited: set[int],
+    join_budget: JoinBudget,
 ) -> None:
     """If a previous run left a report.json here, re-verify those sources
-    (still active? still relevant?) and keep the ones that pass, so results
-    accumulate across runs instead of resetting to zero every time. These
-    are already-known sources, so they must not trigger a fresh Saved
-    Messages notification just for being re-confirmed.
+    (still active? still relevant? join request approved by now?) and keep
+    the ones that pass, so results accumulate across runs instead of
+    resetting to zero every time. These are already-known sources, so they
+    must not trigger a fresh Saved Messages notification just for being
+    re-confirmed.
     """
     previous_report = config.output_dir / "report.json"
     if not previous_report.exists():
         return
     try:
-        items = json.loads(previous_report.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError):
+        source_items, pending_items = _load_previous_report(previous_report)
+    except (json.JSONDecodeError, OSError, ValueError):
         logger.warning("Could not read %s, skipping re-check", previous_report)
         return
 
-    known_ids = frozenset(item["chat_id"] for item in items if "chat_id" in item)
-    usernames = {item["username"] for item in items if item.get("username")}
+    known_ids = frozenset(
+        item["chat_id"] for item in (*source_items, *pending_items) if "chat_id" in item
+    )
+    usernames = {item["username"] for item in source_items if item.get("username")}
+    for item in pending_items:
+        usernames |= extract_usernames(item.get("link", ""))
     if not usernames:
         return
 
@@ -125,7 +163,14 @@ async def _recheck_previous_run(
     )
     prev_candidates = await resolve_usernames(client, usernames)
     await _analyze_batch(
-        client, config, prev_candidates, confirmed, visited, suppress_notify_ids=known_ids
+        client,
+        config,
+        prev_candidates,
+        confirmed,
+        pending,
+        visited,
+        join_budget,
+        suppress_notify_ids=known_ids,
     )
 
 
@@ -133,18 +178,20 @@ async def _pipeline(
     client: TelegramClient,
     config: Config,
     confirmed: dict[int, SourceReport],
+    pending: dict[int, PendingSource],
     visited: set[int],
+    join_budget: JoinBudget,
 ) -> None:
-    await _recheck_previous_run(client, config, confirmed, visited)
+    await _recheck_previous_run(client, config, confirmed, pending, visited, join_budget)
 
     seeds = await resolve_seeds(client, config.seeds_file)
     if seeds:
         logger.info("Loaded %d seed candidates from %s", len(seeds), config.seeds_file)
-        await _analyze_batch(client, config, seeds, confirmed, visited)
+        await _analyze_batch(client, config, seeds, confirmed, pending, visited, join_budget)
 
     discovered = await discover_chats(client, config)
     candidates = {cid: entity for cid, (entity, _cats) in discovered.items()}
-    await _analyze_batch(client, config, candidates, confirmed, visited)
+    await _analyze_batch(client, config, candidates, confirmed, pending, visited, join_budget)
 
     for round_no in range(1, config.snowball_max_rounds + 1):
         channels_count, chats_count = _split_counts(confirmed)
@@ -156,11 +203,13 @@ async def _pipeline(
             )
             break
 
+        # linked_usernames comes from scanning every fetched message of
+        # every confirmed source, not just the handful shown as samples --
+        # that's what lets this dig into channels/chats no search query
+        # would ever surface directly.
         usernames: set[str] = set()
         for report in confirmed.values():
-            usernames |= extract_usernames(report.about)
-            for post in report.sample_posts:
-                usernames |= extract_usernames(post.text)
+            usernames.update(report.linked_usernames)
 
         if not usernames:
             logger.info("No linked usernames to follow, stopping snowball.")
@@ -174,7 +223,7 @@ async def _pipeline(
         if not new_candidates:
             logger.info("Snowball round %d found nothing new, stopping.", round_no)
             break
-        await _analyze_batch(client, config, new_candidates, confirmed, visited)
+        await _analyze_batch(client, config, new_candidates, confirmed, pending, visited, join_budget)
 
 
 async def run_search(output_dir: str | None) -> None:
@@ -184,10 +233,12 @@ async def run_search(output_dir: str | None) -> None:
 
     client = await build_client(config)
     confirmed: dict[int, SourceReport] = {}
+    pending: dict[int, PendingSource] = {}
     visited: set[int] = set()
+    join_budget = JoinBudget(config.max_joins_per_run)
 
     try:
-        pipeline = _pipeline(client, config, confirmed, visited)
+        pipeline = _pipeline(client, config, confirmed, pending, visited, join_budget)
         if config.max_runtime_minutes:
             try:
                 await asyncio.wait_for(pipeline, timeout=config.max_runtime_minutes * 60)
@@ -201,14 +252,18 @@ async def run_search(output_dir: str | None) -> None:
 
         channels_count, chats_count = _split_counts(confirmed)
         logger.info(
-            "Finished: %d channels, %d chats confirmed (targets: %d channels / %d chats).",
+            "Finished: %d channels, %d chats confirmed, %d pending approval "
+            "(targets: %d channels / %d chats).",
             channels_count,
             chats_count,
+            len(pending),
             config.target_channels,
             config.target_chats,
         )
 
-        md_path, json_path = write_reports(list(confirmed.values()), config.output_dir)
+        md_path, json_path = write_reports(
+            list(confirmed.values()), list(pending.values()), config.output_dir
+        )
         logger.info("Markdown report: %s", md_path)
         logger.info("JSON report: %s", json_path)
     finally:

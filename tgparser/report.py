@@ -6,20 +6,24 @@ from dataclasses import asdict
 from datetime import datetime, timezone
 from pathlib import Path
 
-from .models import SourceReport
+from .models import PendingSource, SourceReport
 
 
 def sort_sources(sources: list[SourceReport]) -> list[SourceReport]:
     return sorted(sources, key=lambda s: s.score, reverse=True)
 
 
-def to_json(sources: list[SourceReport]) -> str:
+def to_json(sources: list[SourceReport], pending: list[PendingSource]) -> str:
     def default(value):
         if isinstance(value, datetime):
             return value.isoformat()
         raise TypeError(f"Not serializable: {value!r}")
 
-    return json.dumps([asdict(s) for s in sources], default=default, ensure_ascii=False, indent=2)
+    payload = {
+        "sources": [asdict(s) for s in sources],
+        "pending": [asdict(p) for p in pending],
+    }
+    return json.dumps(payload, default=default, ensure_ascii=False, indent=2)
 
 
 def _render_source(source: SourceReport) -> list[str]:
@@ -47,7 +51,7 @@ def _render_source(source: SourceReport) -> list[str]:
     return lines
 
 
-def to_markdown(sources: list[SourceReport]) -> str:
+def to_markdown(sources: list[SourceReport], pending: list[PendingSource]) -> str:
     generated_at = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
     channels = [s for s in sources if s.kind == "channel"]
     chats = [s for s in sources if s.kind == "chat"]
@@ -55,7 +59,8 @@ def to_markdown(sources: list[SourceReport]) -> str:
     lines = [
         "# Telegram-источники заказов: видеомонтаж / reels / motion / SMM / креативы",
         "",
-        f"_Сформировано: {generated_at}. Найдено каналов: {len(channels)}, чатов: {len(chats)}._",
+        f"_Сформировано: {generated_at}. Найдено каналов: {len(channels)}, чатов: {len(chats)}"
+        f", ждут одобрения заявки: {len(pending)}._",
         "",
     ]
 
@@ -69,17 +74,32 @@ def to_markdown(sources: list[SourceReport]) -> str:
     for source in chats:
         lines.extend(_render_source(source))
 
+    if pending:
+        lines.append(f"# Требуют заявки на вступление ({len(pending)})")
+        lines.append("")
+        lines.append(
+            "Прочитать посты не удалось без вступления, а вступление тут требует "
+            "одобрения администратора — проверьте эти ссылки вручную."
+        )
+        lines.append("")
+        for item in pending:
+            kind_label = "канал" if item.kind == "channel" else "чат"
+            lines.append(f"- [{item.title}]({item.link}) ({kind_label})")
+        lines.append("")
+
     return "\n".join(lines)
 
 
-def write_reports(sources: list[SourceReport], output_dir: Path) -> tuple[Path, Path]:
+def write_reports(
+    sources: list[SourceReport], pending: list[PendingSource], output_dir: Path
+) -> tuple[Path, Path]:
     output_dir.mkdir(parents=True, exist_ok=True)
     sources = sort_sources(sources)
 
     md_path = output_dir / "report.md"
     json_path = output_dir / "report.json"
 
-    md_path.write_text(to_markdown(sources), encoding="utf-8")
-    json_path.write_text(to_json(sources), encoding="utf-8")
+    md_path.write_text(to_markdown(sources, pending), encoding="utf-8")
+    json_path.write_text(to_json(sources, pending), encoding="utf-8")
 
     return md_path, json_path

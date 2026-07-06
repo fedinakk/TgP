@@ -60,6 +60,10 @@ class Config:
     seeds_file: Path | None
     notify_saved_messages: bool
 
+    auto_join_chats: bool
+    join_delay_seconds: float
+    max_joins_per_run: int
+
 
 def load_config() -> Config:
     api_id = _env_int("TG_API_ID")
@@ -98,8 +102,11 @@ def load_config() -> Config:
         target_channels=_env_int("TARGET_CHANNELS", 150),
         target_chats=_env_int("TARGET_CHATS", 30),
         concurrency=_env_int("CONCURRENCY", 5),
-        snowball_max_rounds=_env_int("SNOWBALL_MAX_ROUNDS", 6),
-        max_runtime_minutes=_env_int("MAX_RUNTIME_MINUTES", 180),
+        snowball_max_rounds=_env_int("SNOWBALL_MAX_ROUNDS", 25),
+        max_runtime_minutes=_env_int("MAX_RUNTIME_MINUTES", 360),
         seeds_file=seeds_path,
         notify_saved_messages=_env_bool("NOTIFY_SAVED_MESSAGES", True),
+        auto_join_chats=_env_bool("AUTO_JOIN_CHATS", True),
+        join_delay_seconds=float(os.getenv("JOIN_DELAY_SECONDS", "8")),
+        max_joins_per_run=_env_int("MAX_JOINS_PER_RUN", 150),
     )
