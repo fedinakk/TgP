@@ -3,17 +3,31 @@
 Uses messages.searchGlobal — the same API behind Telegram's in-app search —
 which matches actual message text across public chats, not just chat titles.
 That is what makes it possible to find real order/job posts, as opposed to
-contacts.search (used previously) which only matches chat names.
+contacts.search (title/name matching only).
+
+In practice messages.searchGlobal for a given account plateaus after a
+modest number of unique chats no matter how many query words you throw at
+it -- this looks like a platform-side depth limit (Telegram's own global
+search is known to return a shallower result set for regular accounts than
+for Premium ones), not something fixable by query wording alone. Two things
+help push past that ceiling without trying to bypass any actual limit:
+  - contacts.search as a second, differently-indexed source (matches chat
+    titles/usernames rather than message text).
+  - re-running the same query across several non-overlapping time windows,
+    since a plateaued single pagination chain can still surface different
+    results when explicitly pointed at an older time range via min/max_date.
 """
 from __future__ import annotations
 
 import asyncio
 import logging
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import AsyncIterator
 
 from telethon import TelegramClient
 from telethon.errors import FloodWaitError, UsernameInvalidError, UsernameNotOccupiedError
+from telethon.tl.functions.contacts import SearchRequest
 from telethon.tl.functions.messages import SearchGlobalRequest
 from telethon.tl.types import Channel, Chat, InputMessagesFilterEmpty, InputPeerEmpty
 from telethon.tl.types.messages import MessagesSlice
@@ -26,6 +40,17 @@ logger = logging.getLogger(__name__)
 
 PAGE_SIZE = 50
 
+# Non-overlapping lookback windows for full-text search: each one starts a
+# fresh pagination chain, so a chain that plateaus for "all time" can still
+# turn up unseen chats once pointed at just e.g. the 30-180 day range.
+_WINDOW_EDGES_DAYS = (0, 7, 30, 180, 730, None)
+
+
+def _search_windows() -> list[tuple[datetime | None, datetime | None]]:
+    now = datetime.now(timezone.utc)
+    edges = [now - timedelta(days=d) if d is not None else None for d in _WINDOW_EDGES_DAYS]
+    return list(zip(edges[1:], edges[:-1]))  # (min_date, max_date) per window, newest first
+
 
 async def _search_query(
     client: TelegramClient,
@@ -35,6 +60,8 @@ async def _search_query(
     groups_only: bool,
     max_pages: int,
     delay: float,
+    min_date: datetime | None = None,
+    max_date: datetime | None = None,
 ) -> AsyncIterator[Channel | Chat]:
     """Paginate messages.searchGlobal for one query, yielding unique chat entities."""
     seen_chat_ids: set[int] = set()
@@ -48,8 +75,8 @@ async def _search_query(
                 SearchGlobalRequest(
                     q=query,
                     filter=InputMessagesFilterEmpty(),
-                    min_date=None,
-                    max_date=None,
+                    min_date=min_date,
+                    max_date=max_date,
                     offset_rate=offset_rate,
                     offset_peer=offset_peer,
                     offset_id=offset_id,
@@ -89,43 +116,75 @@ async def _search_query(
         await asyncio.sleep(delay)
 
 
+async def _search_contacts_once(
+    client: TelegramClient, query: str, limit: int
+) -> list[Channel | Chat]:
+    """contacts.search matches chat titles/usernames -- a differently-indexed
+    complement to the full-text message search above.
+    """
+    try:
+        result = await client(SearchRequest(q=query, limit=limit))
+    except FloodWaitError as exc:
+        logger.warning("FloodWait %ss on contacts.search %r, sleeping", exc.seconds, query)
+        await asyncio.sleep(exc.seconds + 1)
+        result = await client(SearchRequest(q=query, limit=limit))
+    return [c for c in result.chats if isinstance(c, (Channel, Chat)) and not getattr(c, "deactivated", False)]
+
+
 async def discover_chats(
     client: TelegramClient, config: Config
 ) -> dict[int, tuple[Channel | Chat, list[str]]]:
     """Search across every category's queries, separately for channels and
-    groups, and collect unique candidate chats plus which categories'
-    queries surfaced them (a chat can match several categories).
+    groups and across several time windows (see module docstring for why),
+    plus a contacts.search pass, collecting unique candidate chats and which
+    categories' queries surfaced them (a chat can match several).
     """
     found: dict[int, tuple[Channel | Chat, list[str]]] = {}
+    windows = _search_windows()
 
     total_queries = sum(len(c.search_queries) for c in CATEGORIES)
     logger.info(
-        "Searching Telegram: %d queries across %d categories (this runs silently "
-        "for a while between log lines, that's expected)",
+        "Searching Telegram: %d queries x %d time windows x 2 (channels/groups) "
+        "+ contacts.search, across %d categories (runs silently for a while "
+        "between log lines, that's expected)",
         total_queries,
+        len(windows),
         len(CATEGORIES),
     )
+
+    def _add(entity: Channel | Chat, category_key: str) -> None:
+        existing = found.get(entity.id)
+        if existing:
+            _, cats = existing
+            if category_key not in cats:
+                cats.append(category_key)
+        else:
+            found[entity.id] = (entity, [category_key])
 
     query_no = 0
     for category in CATEGORIES:
         for query in category.search_queries:
             query_no += 1
-            for broadcasts_only, groups_only in ((True, False), (False, True)):
-                async for entity in _search_query(
-                    client,
-                    query,
-                    broadcasts_only=broadcasts_only,
-                    groups_only=groups_only,
-                    max_pages=config.max_pages_per_query,
-                    delay=config.request_delay_seconds,
-                ):
-                    existing = found.get(entity.id)
-                    if existing:
-                        _, cats = existing
-                        if category.key not in cats:
-                            cats.append(category.key)
-                    else:
-                        found[entity.id] = (entity, [category.key])
+
+            for entity in await _search_contacts_once(client, query, PAGE_SIZE):
+                _add(entity, category.key)
+            await asyncio.sleep(config.request_delay_seconds)
+
+            for min_date, max_date in windows:
+                for broadcasts_only, groups_only in ((True, False), (False, True)):
+                    async for entity in _search_query(
+                        client,
+                        query,
+                        broadcasts_only=broadcasts_only,
+                        groups_only=groups_only,
+                        max_pages=config.max_pages_per_query,
+                        delay=config.request_delay_seconds,
+                        min_date=min_date,
+                        max_date=max_date,
+                    ):
+                        _add(entity, category.key)
+                await asyncio.sleep(config.request_delay_seconds)
+
             logger.info(
                 "[%d/%d] %r (%s) -> %d candidates so far",
                 query_no,
@@ -134,7 +193,6 @@ async def discover_chats(
                 category.label,
                 len(found),
             )
-            await asyncio.sleep(config.request_delay_seconds)
 
     logger.info("Discovered %d unique candidate chats/channels", len(found))
     return found
