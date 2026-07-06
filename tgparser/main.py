@@ -161,7 +161,7 @@ async def _recheck_previous_run(
         len(usernames),
         previous_report,
     )
-    prev_candidates = await resolve_usernames(client, usernames)
+    prev_candidates = await resolve_usernames(client, usernames, config)
     await _analyze_batch(
         client,
         config,
@@ -184,7 +184,7 @@ async def _pipeline(
 ) -> None:
     await _recheck_previous_run(client, config, confirmed, pending, visited, join_budget)
 
-    seeds = await resolve_seeds(client, config.seeds_file)
+    seeds = await resolve_seeds(client, config.seeds_file, config)
     if seeds:
         logger.info("Loaded %d seed candidates from %s", len(seeds), config.seeds_file)
         await _analyze_batch(client, config, seeds, confirmed, pending, visited, join_budget)
@@ -218,7 +218,7 @@ async def _pipeline(
         logger.info(
             "Snowball round %d: resolving %d linked usernames", round_no, len(usernames)
         )
-        new_candidates = await resolve_usernames(client, usernames)
+        new_candidates = await resolve_usernames(client, usernames, config)
         new_candidates = {cid: e for cid, e in new_candidates.items() if cid not in visited}
         if not new_candidates:
             logger.info("Snowball round %d found nothing new, stopping.", round_no)

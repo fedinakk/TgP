@@ -64,6 +64,9 @@ class Config:
     join_delay_seconds: float
     max_joins_per_run: int
 
+    resolve_delay_seconds: float
+    max_flood_wait_seconds: int
+
 
 def load_config() -> Config:
     api_id = _env_int("TG_API_ID")
@@ -109,4 +112,6 @@ def load_config() -> Config:
         auto_join_chats=_env_bool("AUTO_JOIN_CHATS", True),
         join_delay_seconds=float(os.getenv("JOIN_DELAY_SECONDS", "8")),
         max_joins_per_run=_env_int("MAX_JOINS_PER_RUN", 150),
+        resolve_delay_seconds=float(os.getenv("RESOLVE_DELAY_SECONDS", "2.5")),
+        max_flood_wait_seconds=_env_int("MAX_FLOOD_WAIT_SECONDS", 300),
     )

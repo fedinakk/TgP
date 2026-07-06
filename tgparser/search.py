@@ -33,6 +33,7 @@ from telethon.tl.types import Channel, Chat, InputMessagesFilterEmpty, InputPeer
 from telethon.tl.types.messages import MessagesSlice
 
 from .config import Config
+from .flood import wait_out_flood
 from .keywords import CATEGORIES
 from .links import parse_seed_line
 
@@ -60,6 +61,7 @@ async def _search_query(
     groups_only: bool,
     max_pages: int,
     delay: float,
+    max_flood_wait_seconds: int,
     min_date: datetime | None = None,
     max_date: datetime | None = None,
 ) -> AsyncIterator[Channel | Chat]:
@@ -86,8 +88,8 @@ async def _search_query(
                 )
             )
         except FloodWaitError as exc:
-            logger.warning("FloodWait %ss on query %r, sleeping", exc.seconds, query)
-            await asyncio.sleep(exc.seconds + 1)
+            if not await wait_out_flood(exc, max_flood_wait_seconds, f"query {query!r}"):
+                return
             continue
 
         if not result.messages:
@@ -117,7 +119,7 @@ async def _search_query(
 
 
 async def _search_contacts_once(
-    client: TelegramClient, query: str, limit: int
+    client: TelegramClient, query: str, limit: int, max_flood_wait_seconds: int
 ) -> list[Channel | Chat]:
     """contacts.search matches chat titles/usernames -- a differently-indexed
     complement to the full-text message search above.
@@ -125,9 +127,12 @@ async def _search_contacts_once(
     try:
         result = await client(SearchRequest(q=query, limit=limit))
     except FloodWaitError as exc:
-        logger.warning("FloodWait %ss on contacts.search %r, sleeping", exc.seconds, query)
-        await asyncio.sleep(exc.seconds + 1)
-        result = await client(SearchRequest(q=query, limit=limit))
+        if not await wait_out_flood(exc, max_flood_wait_seconds, f"contacts.search {query!r}"):
+            return []
+        try:
+            result = await client(SearchRequest(q=query, limit=limit))
+        except FloodWaitError:
+            return []
     return [c for c in result.chats if isinstance(c, (Channel, Chat)) and not getattr(c, "deactivated", False)]
 
 
@@ -166,7 +171,9 @@ async def discover_chats(
         for query in category.search_queries:
             query_no += 1
 
-            for entity in await _search_contacts_once(client, query, PAGE_SIZE):
+            for entity in await _search_contacts_once(
+                client, query, PAGE_SIZE, config.max_flood_wait_seconds
+            ):
                 _add(entity, category.key)
             await asyncio.sleep(config.request_delay_seconds)
 
@@ -179,6 +186,7 @@ async def discover_chats(
                         groups_only=groups_only,
                         max_pages=config.max_pages_per_query,
                         delay=config.request_delay_seconds,
+                        max_flood_wait_seconds=config.max_flood_wait_seconds,
                         min_date=min_date,
                         max_date=max_date,
                     ):
@@ -199,18 +207,32 @@ async def discover_chats(
 
 
 async def resolve_usernames(
-    client: TelegramClient, usernames: set[str]
+    client: TelegramClient, usernames: set[str], config: Config
 ) -> dict[int, Channel | Chat]:
     """Resolve bare usernames (no @, no t.me/) to chat/channel entities,
     silently skipping ones that don't exist or aren't public chats.
+
+    Paced with `resolve_delay_seconds` between lookups -- hammering
+    ResolveUsernameRequest back-to-back (no delay at all) is what triggers
+    Telegram's flood limits on it in the first place, and those can escalate
+    to waits of literal hours. If one still comes back too large to sleep
+    out, the rest of this batch is abandoned rather than repeating the same
+    mistake on every remaining username.
     """
     resolved: dict[int, Channel | Chat] = {}
     for username in usernames:
         try:
             entity = await client.get_entity(username)
         except FloodWaitError as exc:
-            logger.warning("FloodWait %ss resolving @%s, sleeping", exc.seconds, username)
-            await asyncio.sleep(exc.seconds + 1)
+            if not await wait_out_flood(
+                exc, config.max_flood_wait_seconds, f"resolving @{username}"
+            ):
+                logger.warning(
+                    "Giving up on the remaining %d usernames in this batch -- "
+                    "Telegram is flood-limiting username lookups right now",
+                    len(usernames) - len(resolved),
+                )
+                break
             try:
                 entity = await client.get_entity(username)
             except (UsernameInvalidError, UsernameNotOccupiedError, ValueError):
@@ -219,11 +241,12 @@ async def resolve_usernames(
             continue
         if isinstance(entity, (Channel, Chat)):
             resolved[entity.id] = entity
+        await asyncio.sleep(config.resolve_delay_seconds)
     return resolved
 
 
 async def resolve_seeds(
-    client: TelegramClient, seeds_file: Path | None
+    client: TelegramClient, seeds_file: Path | None, config: Config
 ) -> dict[int, Channel | Chat]:
     """Load user-curated candidate usernames from seeds.txt (e.g. copied
     out of TGStat/Telega.in catalog pages) and resolve them.
@@ -238,4 +261,4 @@ async def resolve_seeds(
     if not usernames:
         return {}
     logger.info("Resolving %d seed usernames from %s", len(usernames), seeds_file)
-    return await resolve_usernames(client, usernames)
+    return await resolve_usernames(client, usernames, config)

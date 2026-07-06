@@ -19,6 +19,7 @@ from telethon.tl.types import Channel, Chat
 
 from .config import Config
 from .filters import is_relevant_job_post
+from .flood import wait_out_flood
 from .keywords import ALL_CATEGORIES_BY_KEY
 from .links import extract_usernames
 from .models import PendingSource, SamplePost, SourceReport
@@ -87,8 +88,8 @@ async def analyze_chat(
     except (ChannelPrivateError, ValueError):
         return None
     except FloodWaitError as exc:
-        logger.warning("FloodWait %ss fetching about info, sleeping", exc.seconds)
-        await asyncio.sleep(exc.seconds + 1)
+        if not await wait_out_flood(exc, config.max_flood_wait_seconds, "fetching about info"):
+            return None
         try:
             about, participants_count = await _fetch_about(client, entity)
         except (ChannelPrivateError, ValueError):
@@ -172,8 +173,8 @@ async def _get_messages(
     try:
         return await client.get_messages(entity, limit=config.messages_per_chat)
     except FloodWaitError as exc:
-        logger.warning("FloodWait %ss fetching messages, sleeping", exc.seconds)
-        await asyncio.sleep(exc.seconds + 1)
+        if not await wait_out_flood(exc, config.max_flood_wait_seconds, "fetching messages"):
+            return None
         try:
             return await client.get_messages(entity, limit=config.messages_per_chat)
         except NEEDS_JOIN_ERRORS:
@@ -195,8 +196,8 @@ async def _get_messages(
     except UserAlreadyParticipantError:
         pass
     except FloodWaitError as exc:
-        logger.warning("FloodWait %ss joining %s, sleeping", exc.seconds, title)
-        await asyncio.sleep(exc.seconds + 1)
+        if not await wait_out_flood(exc, config.max_flood_wait_seconds, f"joining {title}"):
+            return None
         try:
             await client(JoinChannelRequest(entity))
         except UserAlreadyParticipantError:
