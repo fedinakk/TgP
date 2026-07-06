@@ -86,12 +86,39 @@ async def _analyze_batch(
     await asyncio.gather(*(_worker(entity) for entity in to_run))
 
 
+async def _recheck_previous_run(
+    client: TelegramClient,
+    config: Config,
+    confirmed: dict[int, SourceReport],
+    visited: set[int],
+) -> None:
+    """If a previous run left a report.json here, re-verify those sources
+    (still active? still relevant?) and keep the ones that pass, so results
+    accumulate across runs instead of resetting to zero every time.
+    """
+    previous_report = config.output_dir / "report.json"
+    if not previous_report.exists():
+        return
+    usernames = extract_usernames(previous_report.read_text(encoding="utf-8"))
+    if not usernames:
+        return
+    logger.info(
+        "Re-checking %d sources found in a previous run (%s)",
+        len(usernames),
+        previous_report,
+    )
+    prev_candidates = await resolve_usernames(client, usernames)
+    await _analyze_batch(client, config, prev_candidates, confirmed, visited)
+
+
 async def _pipeline(
     client: TelegramClient,
     config: Config,
     confirmed: dict[int, SourceReport],
     visited: set[int],
 ) -> None:
+    await _recheck_previous_run(client, config, confirmed, visited)
+
     seeds = await resolve_seeds(client, config.seeds_file)
     if seeds:
         logger.info("Loaded %d seed candidates from %s", len(seeds), config.seeds_file)
