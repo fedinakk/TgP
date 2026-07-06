@@ -1,9 +1,15 @@
 """Keyword sets used to search Telegram and to score/filter results.
 
 Each category has:
-  - search_queries: phrases fed into Telegram's full-text global message
-    search (messages.searchGlobal), used to *discover* candidate posts (and,
-    through them, the channels/chats that published them).
+  - search_queries: broad terms for the role/niche itself (not "topic + job
+    word" combinations) fed into Telegram's full-text global message search
+    (messages.searchGlobal) to *discover* candidate posts. A bare term like
+    "видеомонтажер" already matches every message containing that word --
+    narrowing it to "видеомонтажер вакансия" would only return a subset of
+    that, so there's no need to enumerate job-word combinations here.
+    Whether a matched post is actually an order/job post is decided later,
+    per-message, by filters.is_relevant_job_post (topic term + a hiring/price
+    signal) -- that's what keeps the results relevant, not the query itself.
   - content_terms: words/phrases that must appear in a message for it to be
     considered "about this niche" (word-start match, Cyrillic-aware).
 """
@@ -25,26 +31,11 @@ CATEGORIES: tuple[Category, ...] = (
         key="video_editing",
         label="Видеомонтаж",
         search_queries=(
-            "видеомонтаж вакансия",
-            "видеомонтажер заказ",
-            "видеомонтажер удаленно",
-            "монтажер видео удаленно",
-            "ищу видеомонтажера",
-            "нужен видеомонтажер",
-            "требуется видеомонтажер",
-            "видеомонтажер фриланс",
-            "video editor freelance",
-            "video editor hiring",
-            "монтаж видео за оплату",
-            "монтажер на постоянку",
-            "видеомонтажер подработка",
-            "видеомонтажер резюме портфолио",
-            "ищем монтажера",
-            "нужен монтаж ролика",
-            "видеомонтаж на удаленке",
-            "видеооператор монтажер вакансия",
-            "premiere pro монтажер вакансия",
-            "davinci resolve монтажер заказ",
+            "видеомонтажер",
+            "видеомонтаж",
+            "монтажер видео",
+            "монтаж роликов",
+            "видеоредактор",
         ),
         content_terms=(
             "видеомонтаж", "видеомонтажер", "монтажер", "монтаж видео",
@@ -56,21 +47,11 @@ CATEGORIES: tuple[Category, ...] = (
         key="reels_shorts",
         label="Reels / TikTok / Shorts",
         search_queries=(
-            "монтаж reels заказ",
-            "монтажер reels удаленно",
-            "tiktok монтажер",
-            "shorts монтаж вакансия",
-            "нарезка видео тикток",
-            "нужен монтажер reels",
-            "ищу монтажера shorts",
-            "reels editor freelance",
-            "клипмейкер вакансия",
-            "монтаж коротких видео заказ",
-            "нарезка рилс вакансия",
-            "монтаж тикток видео заказ",
-            "нужен монтажер shorts",
-            "клипы для тикток заказ",
-            "reels editor hiring",
+            "монтаж reels",
+            "монтаж shorts",
+            "монтаж тикток",
+            "нарезка роликов",
+            "клипмейкер",
         ),
         content_terms=(
             "reels", "рилс", "рилсы", "tiktok", "тикток", "shorts", "шортс",
@@ -81,19 +62,10 @@ CATEGORIES: tuple[Category, ...] = (
         key="motion_design",
         label="Motion design",
         search_queries=(
-            "motion designer вакансия",
-            "моушн дизайнер заказ",
-            "моушн дизайнер удаленно",
-            "аниматор 2d вакансия",
-            "нужен моушн дизайнер",
-            "ищу моушн дизайнера",
-            "motion design freelance",
-            "after effects аниматор вакансия",
-            "2d аниматор заказ",
-            "моушн дизайнер подработка",
-            "требуется моушн дизайнер",
-            "аниматор фриланс заказ",
-            "motion designer hiring",
+            "моушн дизайнер",
+            "моушн дизайн",
+            "2d аниматор",
+            "after effects аниматор",
         ),
         content_terms=(
             "motion design", "моушн дизайн", "моушен дизайн", "моушн-дизайнер",
@@ -104,20 +76,10 @@ CATEGORIES: tuple[Category, ...] = (
         key="smm",
         label="SMM / ведение соцсетей",
         search_queries=(
-            "smm вакансия удаленно",
-            "smm менеджер заказ",
-            "ведение соцсетей вакансия",
-            "требуется smm менеджер",
-            "нужен smm менеджер",
-            "ищу smm специалиста",
-            "smm specialist freelance",
-            "контент менеджер вакансия удаленно",
-            "smm менеджер удаленно оплата",
-            "ведение инстаграм вакансия",
-            "smm менеджер подработка",
-            "нужен smm специалист",
-            "smm manager hiring",
-            "продвижение соцсетей вакансия",
+            "smm менеджер",
+            "ведение соцсетей",
+            "вести соцсети",
+            "контент менеджер соцсети",
         ),
         content_terms=(
             "smm", "смм", "ведение соцсетей", "ведение социальных сетей",
@@ -129,17 +91,10 @@ CATEGORIES: tuple[Category, ...] = (
         key="creatives",
         label="Креативы для соцсетей",
         search_queries=(
-            "креативы для таргета заказ",
-            "дизайнер креативов вакансия",
-            "креативщик соцсети",
-            "нужен дизайнер креативов",
-            "ищу креативщика",
-            "creative designer ads freelance",
-            "баннеры для рекламы вакансия",
-            "статичные креативы заказ",
-            "дизайнер рекламных креативов подработка",
-            "требуется дизайнер креативов",
-            "креатив для рекламы фриланс",
+            "дизайнер креативов",
+            "креативы для рекламы",
+            "рекламный креатив",
+            "баннеры для таргета",
         ),
         content_terms=(
             "креатив", "креативы", "креативщик", "дизайнер креативов",

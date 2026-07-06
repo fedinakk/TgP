@@ -8,6 +8,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import dataclasses
+import json
 import logging
 from pathlib import Path
 
@@ -49,11 +50,14 @@ async def _analyze_batch(
     candidates: dict[int, object],
     confirmed: dict[int, SourceReport],
     visited: set[int],
+    suppress_notify_ids: frozenset[int] = frozenset(),
 ) -> None:
     """Analyze a batch of candidate entities concurrently (bounded by
     config.concurrency). Confirmed sources are added to `confirmed` and,
     if enabled, immediately pushed to Saved Messages so they're visible
-    while the run is still going.
+    while the run is still going -- unless their id is in
+    `suppress_notify_ids` (already-known sources being re-verified, not
+    new finds).
     """
     semaphore = asyncio.Semaphore(config.concurrency)
 
@@ -67,14 +71,16 @@ async def _analyze_batch(
                 return
             if report:
                 confirmed[entity.id] = report
+                is_new = entity.id not in suppress_notify_ids
                 logger.info(
-                    "[%s] %s -- %s (%s)",
+                    "[%s]%s %s -- %s (%s)",
                     report.kind,
+                    "" if is_new else " (known)",
                     report.title,
                     report.link,
                     ", ".join(report.matched_categories),
                 )
-                if config.notify_saved_messages:
+                if config.notify_saved_messages and is_new:
                     await _notify_found(client, report)
             await asyncio.sleep(config.request_delay_seconds)
 
@@ -94,21 +100,33 @@ async def _recheck_previous_run(
 ) -> None:
     """If a previous run left a report.json here, re-verify those sources
     (still active? still relevant?) and keep the ones that pass, so results
-    accumulate across runs instead of resetting to zero every time.
+    accumulate across runs instead of resetting to zero every time. These
+    are already-known sources, so they must not trigger a fresh Saved
+    Messages notification just for being re-confirmed.
     """
     previous_report = config.output_dir / "report.json"
     if not previous_report.exists():
         return
-    usernames = extract_usernames(previous_report.read_text(encoding="utf-8"))
+    try:
+        items = json.loads(previous_report.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        logger.warning("Could not read %s, skipping re-check", previous_report)
+        return
+
+    known_ids = frozenset(item["chat_id"] for item in items if "chat_id" in item)
+    usernames = {item["username"] for item in items if item.get("username")}
     if not usernames:
         return
+
     logger.info(
         "Re-checking %d sources found in a previous run (%s)",
         len(usernames),
         previous_report,
     )
     prev_candidates = await resolve_usernames(client, usernames)
-    await _analyze_batch(client, config, prev_candidates, confirmed, visited)
+    await _analyze_batch(
+        client, config, prev_candidates, confirmed, visited, suppress_notify_ids=known_ids
+    )
 
 
 async def _pipeline(

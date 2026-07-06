@@ -92,7 +92,7 @@ def load_config() -> Config:
         proxy=proxy,
         active_window_hours=_env_int("ACTIVE_WINDOW_HOURS", 24),
         messages_per_chat=_env_int("MESSAGES_PER_CHAT", 150),
-        max_pages_per_query=_env_int("MAX_PAGES_PER_QUERY", 5),
+        max_pages_per_query=_env_int("MAX_PAGES_PER_QUERY", 10),
         request_delay_seconds=float(os.getenv("REQUEST_DELAY_SECONDS", "1.5")),
         output_dir=Path(os.getenv("OUTPUT_DIR", "out")),
         target_channels=_env_int("TARGET_CHANNELS", 150),
