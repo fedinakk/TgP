@@ -17,6 +17,7 @@ from telethon import TelegramClient
 from .analyzer import JoinBudget, analyze_chat
 from .config import Config, load_config
 from .links import extract_usernames
+from .lookup import DEFAULT_QUERIES_FILE, find_source, parse_queries_file, render_markdown
 from .models import PendingSource, SourceReport
 from .report import write_reports
 from .search import discover_chats, resolve_seeds, resolve_usernames
@@ -270,6 +271,42 @@ async def run_search(output_dir: str | None) -> None:
         await client.disconnect()
 
 
+async def run_find_source(queries_file: str | None) -> None:
+    config = load_config()
+    path = Path(queries_file) if queries_file else Path(DEFAULT_QUERIES_FILE)
+    queries = parse_queries_file(path)
+    if not queries:
+        logger.info(
+            "No snippets found in %s -- put one distinctive piece of post text per "
+            "line in that file and re-run.",
+            path,
+        )
+        return
+
+    client = await build_client(config)
+    results: list[tuple[str, list]] = []
+    try:
+        for i, query in enumerate(queries, start=1):
+            logger.info("[%d/%d] Searching for: %r", i, len(queries), query)
+            matches = await find_source(client, query, config)
+            if not matches:
+                logger.info("  -> no matches found")
+            for chat, message in matches:
+                title = getattr(chat, "title", "") or str(chat.id)
+                username = getattr(chat, "username", None)
+                link = f"https://t.me/{username}/{message.id}" if username else f"t.me/c/{chat.id}/{message.id}"
+                logger.info("  -> %s: %s", title, link)
+            results.append((query, matches))
+            await asyncio.sleep(config.request_delay_seconds)
+
+        out_path = config.output_dir / "lookup.md"
+        config.output_dir.mkdir(parents=True, exist_ok=True)
+        out_path.write_text(render_markdown(results), encoding="utf-8")
+        logger.info("Results saved to %s", out_path)
+    finally:
+        await client.disconnect()
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -279,10 +316,21 @@ def main() -> None:
         "--output-dir", default=None, help="Where to write report.md/report.json"
     )
 
+    find_parser = subparsers.add_parser(
+        "find-source", help="Find which channel/chat a post snippet was posted in"
+    )
+    find_parser.add_argument(
+        "--queries-file",
+        default=None,
+        help=f"Text file with one snippet per line (default: {DEFAULT_QUERIES_FILE})",
+    )
+
     args = parser.parse_args()
 
     if args.command == "search":
         asyncio.run(run_search(args.output_dir))
+    elif args.command == "find-source":
+        asyncio.run(run_find_source(args.queries_file))
 
 
 if __name__ == "__main__":

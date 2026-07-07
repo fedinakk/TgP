@@ -8,3 +8,4 @@ venv/
 out/
 .pytest_cache/
 seeds.txt
+queries.txt
