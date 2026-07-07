@@ -51,6 +51,8 @@ async def find_source(
     offset_rate = 0
     offset_peer = InputPeerEmpty()
     offset_id = 0
+    raw_seen = 0
+    unmatched = 0
 
     for _ in range(config.max_pages_per_query):
         try:
@@ -76,6 +78,7 @@ async def find_source(
         if not result.messages:
             break
 
+        raw_seen += len(result.messages)
         chats_by_id = {c.id: c for c in result.chats if isinstance(c, (Channel, Chat))}
         for message in result.messages:
             peer = message.peer_id
@@ -84,7 +87,14 @@ async def find_source(
             if chat is not None:
                 matches.append((chat, message))
                 if len(matches) >= max_results:
+                    logger.info(
+                        "  (Telegram returned %d raw hits for this snippet, %d matched to a chat)",
+                        raw_seen,
+                        len(matches),
+                    )
                     return matches
+            else:
+                unmatched += 1
 
         next_rate = getattr(result, "next_rate", None)
         if not next_rate or not isinstance(result, MessagesSlice):
@@ -100,6 +110,14 @@ async def find_source(
 
         await asyncio.sleep(config.request_delay_seconds)
 
+    if raw_seen:
+        logger.info(
+            "  (Telegram returned %d raw hits for this snippet, %d matched to a chat, "
+            "%d couldn't be linked to one)",
+            raw_seen,
+            len(matches),
+            unmatched,
+        )
     return matches
 
 
