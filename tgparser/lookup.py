@@ -41,11 +41,17 @@ def parse_queries_file(path: Path) -> list[str]:
     return queries
 
 
-async def find_source(
-    client: TelegramClient, query: str, config: Config, max_results: int = 10
-) -> list[tuple[Channel | Chat, Message]]:
-    """Search Telegram's global full-text index for this exact snippet,
-    returning (chat, message) pairs for every match found.
+async def _search_pass(
+    client: TelegramClient,
+    query: str,
+    config: Config,
+    *,
+    broadcasts_only: bool,
+    groups_only: bool,
+    max_results: int,
+) -> tuple[list[tuple[Channel | Chat, Message]], int, int]:
+    """One broadcasts-only or groups-only pagination chain. Returns
+    (matches, raw_messages_seen, unmatched_count).
     """
     matches: list[tuple[Channel | Chat, Message]] = []
     offset_rate = 0
@@ -66,8 +72,8 @@ async def find_source(
                     offset_peer=offset_peer,
                     offset_id=offset_id,
                     limit=PAGE_SIZE,
-                    broadcasts_only=None,
-                    groups_only=None,
+                    broadcasts_only=broadcasts_only or None,
+                    groups_only=groups_only or None,
                 )
             )
         except FloodWaitError as exc:
@@ -87,12 +93,7 @@ async def find_source(
             if chat is not None:
                 matches.append((chat, message))
                 if len(matches) >= max_results:
-                    logger.info(
-                        "  (Telegram returned %d raw hits for this snippet, %d matched to a chat)",
-                        raw_seen,
-                        len(matches),
-                    )
-                    return matches
+                    return matches, raw_seen, unmatched
             else:
                 unmatched += 1
 
@@ -110,15 +111,50 @@ async def find_source(
 
         await asyncio.sleep(config.request_delay_seconds)
 
-    if raw_seen:
-        logger.info(
-            "  (Telegram returned %d raw hits for this snippet, %d matched to a chat, "
-            "%d couldn't be linked to one)",
-            raw_seen,
-            len(matches),
-            unmatched,
+    return matches, raw_seen, unmatched
+
+
+async def find_source(
+    client: TelegramClient, query: str, config: Config, max_results: int = 10
+) -> list[tuple[Channel | Chat, Message]]:
+    """Search Telegram's global full-text index for this exact snippet,
+    returning (chat, message) pairs for every match found.
+
+    Runs separate broadcasts-only and groups-only passes rather than one
+    unrestricted search -- without that restriction, Telegram also matches
+    your own private chats/Saved Messages (e.g. if you'd forwarded the
+    post to yourself), which can't be linked to a public chat/channel and
+    would otherwise silently count as "no match".
+    """
+    all_matches: list[tuple[Channel | Chat, Message]] = []
+    total_raw = 0
+    total_unmatched = 0
+
+    for broadcasts_only, groups_only in ((True, False), (False, True)):
+        matches, raw_seen, unmatched = await _search_pass(
+            client,
+            query,
+            config,
+            broadcasts_only=broadcasts_only,
+            groups_only=groups_only,
+            max_results=max_results,
         )
-    return matches
+        all_matches.extend(matches)
+        total_raw += raw_seen
+        total_unmatched += unmatched
+        if len(all_matches) >= max_results:
+            break
+
+    if total_raw or total_unmatched:
+        logger.info(
+            "  (Telegram returned %d raw hits for this snippet, %d matched to a "
+            "channel/chat, %d were from chats we couldn't resolve)",
+            total_raw,
+            len(all_matches),
+            total_unmatched,
+        )
+
+    return all_matches[:max_results]
 
 
 def match_link(chat: Channel | Chat, message: Message) -> str:
